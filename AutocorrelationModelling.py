@@ -5,6 +5,7 @@ import pandas as pd
 from scipy.interpolate import interp1d
 import numpy as np
 from scipy.optimize import curve_fit
+import sys
 from scipy.integrate import simpson, trapezoid
 
 class Conversions:
@@ -108,6 +109,25 @@ class Conversions:
             return normalized_magnitude * np.exp(1j * np.angle(y))
         else:
             return (y - np.min(y)) / (np.max(y) - np.min(y))
+    def NormaliseByArea(x, y):
+        """
+        Normalizes y values so that the area under the curve is 1.
+        
+        Parameters:
+        y (array-like): Input y values.
+        x (array-like): Corresponding x values.
+        
+        Returns:
+        np.ndarray: Area-normalized y values.
+        """
+        area = simpson(y, x)
+        if area == 0:
+            return y
+        y /= area
+        # check
+        # print(f"Area after normalisation: {simpson(y, x)}")
+        return y
+        
 
 
     
@@ -192,6 +212,8 @@ class Autocorrelation:
     def __init__(self, 
         ):
         self.frequency_domain = np.ndarray([]) # Hz
+        self.sampling_frequency = None  # Hz
+        self.number_of_points_in_grid = None # integer
         self.spectrum_in_frequency = np.ndarray([]) # a.u.
         self.wavelength_domain = np.ndarray([])
         self.spectrum_in_wavelength = np.ndarray([])
@@ -201,7 +223,7 @@ class Autocorrelation:
         self.field_in_time = np.ndarray([])
         self.time_domain = np.ndarray([])
 
-        self.simulated_autocorrelation_delays = np.ndarray([])
+        self.simulated_autocorrelation_delays_fs = np.ndarray([])
         self.simulated_autocorrelation = np.ndarray([])
 
         self.measured_autocorrelation_delays = np.ndarray([])
@@ -231,19 +253,41 @@ class Autocorrelation:
         if skip_footer > 0:
             spectrometer_wavelengths = np.array(spectrometer_wavelengths[0:-1], dtype=float)
             spectrometer_signal = np.array(spectrometer_signal[0:-1], dtype=float)
-        self.wavelengths = np.array(spectrometer_wavelengths, dtype=float)
+        self.wavelength_domain = np.array(spectrometer_wavelengths, dtype=float)
         self.spectrum_in_wavelength = np.array(spectrometer_signal, dtype=float)
+        self.number_of_points_in_grid = len(self.wavelength_domain)
         if normalise:
             self.spectrum_in_wavelength = Conversions.Normalise(self.spectrum_in_wavelength)
         # Interpolate to frequency domain
-        if self.frequency_domain is None:
-            pass
+        frequency_from_wavelengths = self.c / (self.wavelength_domain * 1e-9)  # Convert wavelength to frequency in Hz
+        interp_func = interp1d(frequency_from_wavelengths,
+                               self.spectrum_in_wavelength,
+                               bounds_error=False,
+                               fill_value=(self.spectrum_in_wavelength[0], self.spectrum_in_wavelength[-1]))        # use first/last value beyond range)
+        self.create_frequency_domain(min_wavelength_nm=np.min(self.wavelength_domain),
+                                      number_of_points_in_grid=self.number_of_points_in_grid)
+        self.time_domain = np.arange(self.number_of_points_in_grid) / self.sampling_frequency  # time grid
+        self.spectrum_in_frequency = interp_func(self.frequency_domain)
+        # plt.plot(self.frequency_domain, self.spectrum_in_frequency)
+        # plt.xlabel("Frequency (Hz)")
+        # plt.ylabel("Intensity (a.u.)")
+        # plt.title("Spectrum in Frequency Domain")
+        # plt.show()
 
     def interpolate_spectrum_to_wavelength_domain(self):
         pass
+
     def interpolate_spectrum_to_frequency_domain(self):
         pass
-
+    
+    def create_frequency_domain(self, min_wavelength_nm=400, number_of_points_in_grid=2048, nyquist_sampling_factor=2.0):
+        maximum_frequency = self.c / (min_wavelength_nm * 1e-9)  # Hz
+        self.sampling_frequency = nyquist_sampling_factor * maximum_frequency
+        self.number_of_points_in_grid = number_of_points_in_grid
+        dt = 1.0 / self.sampling_frequency  # s
+        # Frequency grid
+        self.frequency_domain = np.fft.fftfreq(n=number_of_points_in_grid, d=dt) # Hz, unshifted
+    
     def create_domains(self,
                                 min_wavelength_nm=400,
                                 max_wavelength_nm=700,
@@ -252,19 +296,29 @@ class Autocorrelation:
         """
         Creates frequency and wavelength domains for modelling.
         """
-        maximum_frequency = self.c / (min_wavelength_nm * 1e-9)  # Hz
-        sampling_frequency = nyquist_sampling_factor * maximum_frequency
-        dt = 1.0 / sampling_frequency  # s
-        # Frequency grid
-        self.frequency_domain = np.fft.fftfreq(n=number_of_points_in_grid, d=dt) # Hz, unshifted
+        self.create_frequency_domain(min_wavelength_nm=min_wavelength_nm,
+                                      number_of_points_in_grid=number_of_points_in_grid,
+                                      nyquist_sampling_factor=nyquist_sampling_factor)
+        
         self.wavelength_domain = np.linspace(min_wavelength_nm, max_wavelength_nm, number_of_points_in_grid)  # nm
+        self.time_domain = np.arange(self.number_of_points_in_grid) / self.sampling_frequency  # time grid
 
     def convert_FWHM_spectral_bandwidth_nm_to_Hz(self,
                                                  spectral_bandwidth_nm,
                                                  central_wavelength_nm):
         spectral_bandwidth_Hz = (self.c / 1e-9) * (1 / (central_wavelength_nm - spectral_bandwidth_nm/2) - 1 / (central_wavelength_nm + spectral_bandwidth_nm/2))
         return spectral_bandwidth_Hz
-
+    
+    def get_FWHM(self,
+                 x_data,
+                 y_data):
+        half_max = np.max(y_data) / 2.0
+        indices_above_half_max = np.where(y_data >= half_max)[0]
+        if len(indices_above_half_max) < 2:
+            return 0  # FWHM cannot be determined
+        fwhm = x_data[indices_above_half_max[-1]] - x_data[indices_above_half_max[0]]
+        return fwhm
+    
     def create_synthetic_spectrum(self,
                                    amplitude=1.0,
                                    central_frequency_Hz=3.58e14,
@@ -315,12 +369,158 @@ class Autocorrelation:
             self.spectrum_in_wavelength = Conversions.Normalise(self.spectrum_in_wavelength)
             self.spectrum_in_frequency = Conversions.Normalise(self.spectrum_in_frequency)
 
-    def create_spectral_phase(self):  
-        pass
+    def create_spectral_phase(self,
+                              central_frequency, # Hz
+                              CEP=0,
+                              group_delay=0e-15, # fs
+                              group_delay_dispersion=0e-30, # fs2
+                              third_order_dispersion=0e-45, # fs3
+                              fourth_order_dispersion=0e-60, # fs4
+                              ):  
+        # Check frequency domain is initialised
+        if self.frequency_domain is np.array([]):
+            raise ValueError("Frequency domain must be initialised! Call create_domains() first.")
+        
+        # Spectral phase (Taylor expansion about central frequency)
+        phi_0 = CEP
+        phi_1 = group_delay * 2 * np.pi
+        phi_2 = group_delay_dispersion * (2 * np.pi)**2
+        phi_3 = third_order_dispersion * (2 * np.pi)**3
+        phi_4 = fourth_order_dispersion * (2 * np.pi)**4
+
+        self.spectral_phase = (phi_0
+                + phi_1 * (self.frequency_domain - central_frequency)
+                + 0.5 * phi_2 * (self.frequency_domain - central_frequency)**2
+                + (1.0/6.0) * phi_3 * (self.frequency_domain - central_frequency)**3
+                + (1.0/24.0) * phi_4 * (self.frequency_domain - central_frequency)**4)
 
     def create_field_in_frequency(self):
+        self.field_in_frequency = np.sqrt(self.spectrum_in_frequency) * np.exp(1j * self.spectral_phase)
+
+    def plot_field_in_frequency(self,
+                                plot_spectral_phase=True,
+                                plot_amplitude=False,
+                                plot_field=True):
+        # Create figure with twin axes
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        ax2 = ax1.twinx()
+
+        position_of_peak = np.where(self.field_in_frequency == np.max(self.field_in_frequency))[0]
+        fwhm = self.get_FWHM(self.frequency_domain, np.abs(self.field_in_frequency))
+        ax1.set_xlim([self.frequency_domain[position_of_peak] - 3*fwhm, self.frequency_domain[position_of_peak] + 3*fwhm])
+        # Plot amplitude/field on first axis
+        if plot_amplitude:
+            ax1.plot(self.frequency_domain, np.abs(self.field_in_frequency), 'b-', label='Amplitude')
+        if plot_field:
+            ax1.plot(self.frequency_domain, np.real(self.field_in_frequency), 'g-', label='Real Field')
+            ax1.plot(self.frequency_domain, np.imag(self.field_in_frequency), 'r-', label='Imaginary Field')
+        ax1.set_xlabel('Frequency (Hz)')
+        ax1.set_ylabel('Amplitude', color='b')
+        ax1.tick_params(axis='y', labelcolor='b')
+
+        # Plot phase on second axis if requested
+        if plot_spectral_phase:
+            ax2.plot(self.frequency_domain, np.unwrap(np.angle(self.field_in_frequency)), 'k--', label='Phase')
+            ax2.set_ylabel('Phase (rad)', color='k')
+            ax2.tick_params(axis='y', labelcolor='k')
+            min_y_value = np.min(np.unwrap(np.angle(self.field_in_frequency))[(self.frequency_domain >= ax1.get_xlim()[0]) & (self.frequency_domain <= ax1.get_xlim()[1])])
+            max_y_value = np.max(np.unwrap(np.angle(self.field_in_frequency))[(self.frequency_domain >= ax1.get_xlim()[0]) & (self.frequency_domain <= ax1.get_xlim()[1])])
+            print(f"Phase min/max in view: {min_y_value}, {max_y_value}")
+            ax2.set_ylim([min_y_value, max_y_value])
+             
+
+        # Add legend and show plot
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2)
+        plt.title('Field in Frequency Domain')
+        plt.show()
+
+    def apply_hann_window(self,
+                          filter_central_frequency_Hz,
+                          filter_bandwidth_Hz):
+        """
+        Applies a Hann window centered at `center_freq` with width `bandwidth`.
+        Tapers smoothly to zero outside the region.
+        """
+        # Half-width in Hz
+        half_bw = filter_bandwidth_Hz / 2.0
+
+        #  Create normalized frequency distance from center
+        f_offset = self.frequency_domain - filter_central_frequency_Hz
+        # Initialize window with zeros
+        window = np.zeros_like(self.frequency_domain)
+        # Identify region inside the spectral window
+        inside = np.abs(f_offset) <= half_bw
+        # Apply Hann taper within the region
+        # Hann = 0.5 * (1 + cos(pi * x / half_bw)) for |x| <= half_bw
+        window[inside] = 0.5 * (1 + np.cos(np.pi * f_offset[inside] / half_bw))
+        # Apply window to spectrum
+        E_f_windowed = self.field_in_frequency * window
+        return E_f_windowed, window
+
+    def compute_field_in_time(self,
+                             hann_filter_central_frequency_Hz=None,
+                             hann_filter_bandwidth_Hz=None,
+                             normalisation=None,
+                             plot=False
+                             ):
+        """
+        Computes the time-domain electric field via inverse FFT.
+        Optionally applies a Hann window filter in the frequency domain before transformation.
+        Parameters:
+        - hann_filter_central_frequency_Hz: Central frequency of the Hann window filter (Hz)
+        - hann_filter_bandwidth_Hz: Bandwidth of the Hann window filter (Hz)
+        - normalise: Whether to normalise the time-domain field ('area', 'amplitude' or None)
+        - plot: Whether to plot the frequency and time domain fields
+        """
+        assert self.field_in_frequency.size > 1, \
+            "Field in frequency domain must be initialised! Call create_field_in_frequency() first."
+        hann_window = None
+        if hann_filter_central_frequency_Hz is not None and hann_filter_bandwidth_Hz is not None:
+            field_in_frequency, hann_window = self.apply_hann_window(hann_filter_central_frequency_Hz, hann_filter_bandwidth_Hz)
+        else:
+            field_in_frequency = self.field_in_frequency
+
+        self.field_in_time = self.sampling_frequency * np.fft.ifft(field_in_frequency)   # includes Δf factor
+        if normalisation is not None:
+            if normalisation.lower() == 'area':
+                self.field_in_time = Conversions.NormaliseByArea(self.time_domain, self.field_in_time)
+            elif normalisation.lower() == 'amplitude':
+                self.field_in_time = Conversions.Normalise(self.field_in_time)
+            else:
+                raise ValueError(f"Unknown normalisation method: {normalisation}. Choose from ['area', 'amplitude', None].")
+        if plot:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
+            
+            # Plot spectrum and filter
+            ax1.plot(self.frequency_domain, np.abs(self.field_in_frequency), 'b-', label='Original Spectrum')
+            if hann_window is not None:
+                ax1.plot(self.frequency_domain, np.abs(field_in_frequency), 'r-', label='Filtered Spectrum')
+                ax1.plot(self.frequency_domain, hann_window, 'g--', label='Filter')
+            ax1.set_xlabel('Frequency (Hz)')
+            ax1.set_ylabel('Amplitude')
+            position_of_peak = np.where(self.field_in_frequency == np.max(self.field_in_frequency))[0]
+            fwhm = self.get_FWHM(self.frequency_domain, np.abs(self.field_in_frequency))
+            ax1.set_xlim([self.frequency_domain[position_of_peak] - 3*fwhm, self.frequency_domain[position_of_peak] + 3*fwhm])
+            ax1.set_ylim([0, 1.1 * np.max(np.abs(self.field_in_frequency))])
+            ax1.legend()
+            ax1.grid(True)
+            
+            # Plot time domain field
+            ax2.plot(self.time_domain*1e15, np.real(np.fft.fftshift(self.field_in_time)), 'b-', label='Field')
+            ax2.set_xlabel('Time (fs)')
+            ax2.set_ylabel('Amplitude')
+            position_of_peak = np.where(np.real(np.fft.fftshift(self.field_in_time)) == np.max(np.real(np.fft.fftshift(self.field_in_time))))[0]
+            fwhm = self.get_FWHM(self.time_domain, np.real(np.fft.fftshift(self.field_in_time)))
+            ax2.set_xlim([(self.time_domain[position_of_peak] - 3*fwhm)*1e15, (self.time_domain[position_of_peak] + 3*fwhm)*1e15])
+            ax2.set_ylim([-1.1 * np.max(np.abs(self.field_in_time)), 1.1 * np.max(np.abs(self.field_in_time))])
+            ax2.legend()
+            ax2.grid(True)
+            
+            plt.tight_layout()
+            plt.show()
         pass
-    
 
     def show_spectrum(self):
         plt.figure(figsize=(8, 4))
@@ -330,8 +530,11 @@ class Autocorrelation:
         plt.title('Stored Spectrum')
         plt.grid(True)
         plt.show()
-
-    def GetDetectorSignal(pulse_1_electric_field_in_t, pulse_2_electric_field_in_t, time_domain, method="trapezoid", intensity_AC=False):
+    
+    def get_detector_signal(pulse_1_electric_field_in_t,
+                            pulse_2_electric_field_in_t,
+                            time_domain, method="trapezoid",
+                            intensity_AC=False):
         if intensity_AC:
             integrand_function = (np.abs(pulse_1_electric_field_in_t)**2)*np.abs(pulse_2_electric_field_in_t**2)
         else:
@@ -347,20 +550,59 @@ class Autocorrelation:
         # print(f"Diff: {integrated_signal - integrated_signal_simpson}")
         return integrated_signal
     
-    def Autocorrelate(time_domain, pulse_1_in_time, autocorrelation_delays, intensity_AC=False):
+    def autocorrelation_delays(self,
+                              min_delay_fs=0,
+                              max_delay_fs=100,
+                              number_of_delay_points=500):
+        self.simulated_autocorrelation_delays_fs = np.linspace(min_delay_fs, max_delay_fs, number_of_delay_points)
+
+    def autocorrelate(self, intensity_AC=False,
+                      print_statements=False,
+                      normalise=True):
         interferometric_autocorrelation_values = []
-        from scipy.interpolate import interp1d
-        for delay in  autocorrelation_delays: # Varying delay from 0 to 10 femtoseconds
-            interpolator = interp1d(time_domain, pulse_1_in_time, kind='linear', fill_value="extrapolate")
-            t_delayed = time_domain - delay  # Shifted time vector
+
+        if self.simulated_autocorrelation_delays_fs.size <= 1:
+            raise ValueError("Autocorrelation delays must be initialised! Call autocorrelation_delays() first.")
+        
+        if print_statements: print("Calculating autocorrelation...")
+        n_delays = len(self.simulated_autocorrelation_delays_fs)
+        bar_length = 30  # characters wide
+
+        pulse_1_in_time = np.fft.fftshift(self.field_in_time)
+
+        for i, delay in enumerate(self.simulated_autocorrelation_delays_fs): # Varying delay from 0 to 10 femtoseconds
+            interpolator = interp1d(self.time_domain, pulse_1_in_time, kind='linear', fill_value="extrapolate")
+            t_delayed = self.time_domain - delay*1e-15  # Shifted time vector
             delayed_signal = interpolator(t_delayed)
             pulse_2_in_time = delayed_signal
             # pulse_sum = pulse_1_in_time + pulse_2_in_time
-            autocorrelation_value = Autocorrelation.GetDetectorSignal(pulse_1_in_time, pulse_2_in_time, time_domain, intensity_AC=intensity_AC)
+            autocorrelation_value = Autocorrelation.get_detector_signal(pulse_1_in_time, pulse_2_in_time, self.time_domain, intensity_AC=intensity_AC)
             interferometric_autocorrelation_values.append(autocorrelation_value)
-        return np.array(interferometric_autocorrelation_values)
+                    # --- Progress bar update ---
+            if print_statements:
+                progress = (i+1) / n_delays
+                percent = int(round(progress * 100))
+                filled_len = int(bar_length * progress)
+                bar = '█' * filled_len + '-' * (bar_length - filled_len)
+                sys.stdout.write(f'\rProgress: |{bar}| {percent}%')
+                sys.stdout.flush()
+        if normalise:
+            self.simulated_autocorrelation = 8 * Conversions.Normalise(np.array(interferometric_autocorrelation_values))
+            return
+        self.simulated_autocorrelation = np.array(interferometric_autocorrelation_values)
 
+    def plot_autocorrelation(self, measured=True, simulated=True):
+        plt.figure(figsize=(8, 4))
+        if measured:
+            if self.measured_autocorrelation.size > 1:
+                plt.plot(self.measured_autocorrelation_delays, self.measured_autocorrelation, 'o-', label='Measured AC', color='C0')
+        if simulated:
+            if self.simulated_autocorrelation.size > 1:
+                plt.plot(self.simulated_autocorrelation_delays_fs, self.simulated_autocorrelation, '-', label='Simulated AC', color='C1')
+        plt.xlabel('Delay (fs)')
+        plt.ylabel('Autocorrelation Signal (a.u.)')
+        plt.title('Autocorrelation')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
-class LaserPulse:
-    def __init__(self):
-        pass

@@ -1,4 +1,5 @@
 # InterferometricAC.py
+import time
 import matplotlib.pyplot as plt
 import math
 import pandas as pd
@@ -226,7 +227,7 @@ class Autocorrelation:
         self.simulated_autocorrelation_delays_fs = np.ndarray([])
         self.simulated_autocorrelation = np.ndarray([])
 
-        self.measured_autocorrelation_delays = np.ndarray([])
+        self.measured_autocorrelation_delays_fs = np.ndarray([])
         self.measured_autocorrelation = np.ndarray([])
 
         self.c = 299792458  # Speed of light in m/s
@@ -274,12 +275,15 @@ class Autocorrelation:
         # plt.title("Spectrum in Frequency Domain")
         # plt.show()
 
-    def interpolate_spectrum_to_wavelength_domain(self):
+    def interpolate_to_wavelength_domain(self):
         pass
 
-    def interpolate_spectrum_to_frequency_domain(self):
-        pass
-    
+    def interpolate_to_frequency_domain(self, data_in_wavelength):
+        interp_func = interp1d(self.wavelength_domain, data_in_wavelength,
+                               bounds_error=False,
+                               fill_value=(data_in_wavelength[0], data_in_wavelength[-1]))  # use first/last value beyond range)
+        return interp_func(self.frequency_domain)
+
     def create_frequency_domain(self, min_wavelength_nm=400, number_of_points_in_grid=2048, nyquist_sampling_factor=2.0):
         maximum_frequency = self.c / (min_wavelength_nm * 1e-9)  # Hz
         self.sampling_frequency = nyquist_sampling_factor * maximum_frequency
@@ -319,10 +323,20 @@ class Autocorrelation:
         fwhm = x_data[indices_above_half_max[-1]] - x_data[indices_above_half_max[0]]
         return fwhm
     
+    def get_FWHM_centre(self,
+                 x_data,
+                 y_data):
+        half_max = np.max(y_data) / 2.0
+        indices_above_half_max = np.where(y_data >= half_max)[0]
+        if len(indices_above_half_max) < 2:
+            return 0  # FWHM cannot be determined
+        return np.mean([x_data[indices_above_half_max[-1]], x_data[indices_above_half_max[0]]])
+
     def create_synthetic_spectrum(self,
                                    amplitude=1.0,
                                    central_frequency_Hz=3.58e14,
                                    spectral_bandwidth_Hz=75,
+                                   noise_amplitude=0.0,
                                    normalise=True):
         """
         Creates a synthetic Gaussian spectrum in the frequency domain. Can make a single Gaussian or a sum of multiple Gaussians.
@@ -348,8 +362,13 @@ class Autocorrelation:
             )
         else:
             raise ValueError("amplitude, central_frequency_Hz, and spectral_bandwidth_Hz must be either all scalars or all lists/arrays of the same length.")
-        
+        additive_noise = np.random.default_rng(None).normal(
+            0.0, noise_amplitude*np.max(self.spectrum_in_frequency), self.spectrum_in_frequency.shape
+        )
+        self.spectrum_in_frequency += additive_noise
+        # print(f"Additive noise: {additive_noise}")
         # Interpolate to wavelength domain
+
         indices_of_only_positive_frequencies = np.where(self.frequency_domain > 0)
         positive_frequencies = self.frequency_domain[indices_of_only_positive_frequencies]
         spectrum_at_positive_frequencies = self.spectrum_in_frequency[indices_of_only_positive_frequencies]
@@ -558,27 +577,43 @@ class Autocorrelation:
 
     def autocorrelate(self, intensity_AC=False,
                       print_statements=False,
-                      normalise=True):
+                      normalise=True,
+                      debugging_plotting=False):
         interferometric_autocorrelation_values = []
 
         if self.simulated_autocorrelation_delays_fs.size <= 1:
             raise ValueError("Autocorrelation delays must be initialised! Call autocorrelation_delays() first.")
         
-        if print_statements: print("Calculating autocorrelation...")
+        if print_statements: print("\nCalculating autocorrelation...")
         n_delays = len(self.simulated_autocorrelation_delays_fs)
         bar_length = 30  # characters wide
 
         pulse_1_in_time = np.fft.fftshift(self.field_in_time)
 
         for i, delay in enumerate(self.simulated_autocorrelation_delays_fs): # Varying delay from 0 to 10 femtoseconds
-            interpolator = interp1d(self.time_domain, pulse_1_in_time, kind='linear', fill_value="extrapolate")
+            interpolator = interp1d(self.time_domain, pulse_1_in_time, kind='linear', bounds_error=False, fill_value=(0.0, 0.0))
             t_delayed = self.time_domain - delay*1e-15  # Shifted time vector
+            # print(t_delayed)
+            # print(f"Delay fs: {delay}")
+            # print(self.time_domain)
+            # print("Time domain range fs:", (self.time_domain[0]*1e15-self.time_domain[-1]*1e15))
+            # input("Press Enter to continue...")
             delayed_signal = interpolator(t_delayed)
             pulse_2_in_time = delayed_signal
             # pulse_sum = pulse_1_in_time + pulse_2_in_time
             autocorrelation_value = Autocorrelation.get_detector_signal(pulse_1_in_time, pulse_2_in_time, self.time_domain, intensity_AC=intensity_AC)
+
+            # plt.plot(self.time_domain*1e15, np.real(pulse_1_in_time+pulse_2_in_time), label='Pulse 1+2')
+            # plt.plot(self.time_domain*1e15, np.real(pulse_1_in_time), label='Pulse 1')
+            # plt.plot(self.time_domain*1e15, np.real(pulse_2_in_time), label='Pulse 2')
+            # plt.legend()
+            # plt.show(block=False)
+            # input("Press Enter to continue...")
+            # plt.close('all')
+
             interferometric_autocorrelation_values.append(autocorrelation_value)
                     # --- Progress bar update ---
+            
             if print_statements:
                 progress = (i+1) / n_delays
                 percent = int(round(progress * 100))
@@ -586,16 +621,62 @@ class Autocorrelation:
                 bar = '█' * filled_len + '-' * (bar_length - filled_len)
                 sys.stdout.write(f'\rProgress: |{bar}| {percent}%')
                 sys.stdout.flush()
+
         if normalise:
             self.simulated_autocorrelation = 8 * Conversions.Normalise(np.array(interferometric_autocorrelation_values))
             return
         self.simulated_autocorrelation = np.array(interferometric_autocorrelation_values)
+        plt.ioff()
+
+    def load_autocorrelation(self,
+                                path,
+                                delimiter=',',
+                                skip_header=1,
+                                delay_col=0,
+                                signal_col=1,
+                                skip_footer=0,
+                                normalise=True,
+                                delay_type='position',
+                                center_on_peak=True):
+        """
+        Valid delay types: 'position' (e.g., mm on translation stage), 'time' (s), 'fs' (femtoseconds)
+        """
+        df = pd.read_csv(
+            path,
+            delimiter=delimiter,
+            skiprows=skip_header,
+            header=None,                 # Treat all rows as data
+            comment=None,                # Don’t skip lines starting with #
+            engine='python',             # More forgiving parser
+        )
+        # Remove footer rows if specified
+        autocorr_delays = df[delay_col]
+        if delay_type.lower() == 'position':
+            # Convert position (mm) to time delay (fs)
+            autocorr_delays = 2 * autocorr_delays*1e-3 / (self.c) * 1e15  # fs
+        elif delay_type.lower() == 'time':
+            autocorr_delays = autocorr_delays * 1e15  # s to fs
+        elif delay_type.lower() == 'fs':
+            pass  # already in fs
+        else:
+            raise ValueError("delay_type must be one of ['position', 'time', 'fs']")
+        if center_on_peak:
+            peak_index = np.argmax(df[signal_col])
+            autocorr_delays = autocorr_delays - autocorr_delays[peak_index]
+        autocorr_signal = df[signal_col]
+        if skip_footer > 0:
+            autocorr_delays = np.array(autocorr_delays[0:-1], dtype=float)
+            autocorr_signal = np.array(autocorr_signal[0:-1], dtype=float)
+        self.measured_autocorrelation_delays_fs = np.array(autocorr_delays, dtype=float)
+        self.measured_autocorrelation = np.array(autocorr_signal, dtype=float)
+        if normalise:
+            self.measured_autocorrelation = 8 * Conversions.Normalise(self.measured_autocorrelation)
 
     def plot_autocorrelation(self, measured=True, simulated=True):
         plt.figure(figsize=(8, 4))
         if measured:
             if self.measured_autocorrelation.size > 1:
-                plt.plot(self.measured_autocorrelation_delays, self.measured_autocorrelation, 'o-', label='Measured AC', color='C0')
+                plt.plot(self.measured_autocorrelation_delays_fs, self.measured_autocorrelation, '-', label='Measured AC', color='C0')
         if simulated:
             if self.simulated_autocorrelation.size > 1:
                 plt.plot(self.simulated_autocorrelation_delays_fs, self.simulated_autocorrelation, '-', label='Simulated AC', color='C1')
@@ -605,4 +686,36 @@ class Autocorrelation:
         plt.legend()
         plt.grid(True)
         plt.show()
+
+    def unflatten_CNN_input(self, CNN_input, individual_array_length):
+        """
+        Unflattens a 1D array into a list of arrays of specified length.
+        
+        Parameters:
+        - CNN_input: 1D numpy array to be unflattened.
+        - individual_array_length: Length of each individual array.
+        
+        Returns:
+        - List of numpy arrays.
+        """
+        total_length = len(CNN_input)
+        if total_length % individual_array_length != 0:
+            raise ValueError("Total length of CNN_input must be divisible by individual_array_length.")
+        
+        number_of_arrays = total_length // individual_array_length # Should be 4
+        if number_of_arrays != 4:
+            raise ValueError("Expected number_of_arrays to be 4.")
+        unflattened_arrays = []
+        
+        for i in range(number_of_arrays):
+            start_index = i * individual_array_length
+            end_index = start_index + individual_array_length
+            unflattened_arrays.append(CNN_input[start_index:end_index])
+        
+        return unflattened_arrays[0], unflattened_arrays[1], unflattened_arrays[2], unflattened_arrays[3]
+class MaterialDispersion:
+    def __init__(self):
+        pass
+
+
 

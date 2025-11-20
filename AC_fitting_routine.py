@@ -18,7 +18,7 @@ spectrum_file = {'path': r"C:\Users\jdm24\OneDrive - Imperial College London\Doc
 autocorr_file = {'path': r"D:\AC_Chimera_osc_AC_27oct2025_4.csv",
                  'delimiter': ',',
                  'skip_header': 1,
-                 'wavelength_col': 0,
+                 'delay_col': 0,
                  'signal_col': 1}
 
 # Create an instance of the AutocorrelationModelling class
@@ -47,7 +47,7 @@ ac_model.create_spectral_phase(
     central_frequency=3.75e14, # Hz
     CEP=0,
     group_delay=0e-15, # fs
-    group_delay_dispersion=400e-30, # fs2
+    group_delay_dispersion=100e-30, # fs2
     third_order_dispersion=0e-45, # fs3
     fourth_order_dispersion=0e-60, # fs4
 )
@@ -67,13 +67,17 @@ ac_model.compute_field_in_time(
 )
 
 ac_model.autocorrelation_delays(
-                              min_delay_fs=-150,
-                              max_delay_fs=150,
+                              min_delay_fs=-200,
+                              max_delay_fs=200,
                               number_of_delay_points=2**12
                             )
 
 ac_model.autocorrelate(intensity_AC=False,
                        print_statements=True,
-                       normalise=True)
+                       normalise=True
+                       )
 
-ac_model.plot_autocorrelation()
+ac_model.load_autocorrelation(**autocorr_file)
+
+ac_model.plot_autocorrelation(measured=True,
+                             simulated=True)
